@@ -590,6 +590,11 @@ def config_menu():
 
 
 def handle_update(u):
+    # il bot e' solo tuo: se qualcuno lo aggiunge a un gruppo o a un canale, esce subito
+    c = (u.get("message") or u.get("my_chat_member") or {}).get("chat", {})
+    if c and str(c.get("id")) != CHAT_ID and c.get("type") != "private":
+        tg("leaveChat", {"chat_id": c["id"]}, tries=1, need_chat=False)
+        return
     q = u.get("callback_query")
     if q:
         tg("answerCallbackQuery", {"callback_query_id": q["id"]}, need_chat=False)
@@ -638,7 +643,7 @@ def wait_updates(until):
     while (left := until - time.time()) > 0:
         try:
             res = tg("getUpdates", {"offset": UPD["offset"], "timeout": max(1, int(left)),
-                                    "allowed_updates": '["message","callback_query"]'},
+                                    "allowed_updates": '["message","callback_query","my_chat_member"]'},
                      tries=1, need_chat=False)
         except Exception as e:  # noqa: BLE001
             log("getUpdates:", e)
@@ -690,9 +695,12 @@ def cmd_test():
 def run():
     need_config()
     try:
+        # il menu dei comandi lo vedi solo tu: niente lista globale, solo quella della tua chat
+        tg("deleteMyCommands", need_chat=False)
         tg("setMyCommands", {"commands": json.dumps(
             [{"command": "last", "description": "Mandami l'ultimo articolo"},
-             {"command": "config", "description": "Personalizza il collage"}])}, need_chat=False)
+             {"command": "config", "description": "Personalizza il collage"}]),
+            "scope": json.dumps({"type": "chat", "chat_id": int(CHAT_ID)})}, need_chat=False)
     except Exception as e:  # noqa: BLE001
         log("setMyCommands:", e)
     seen = load_seen()
