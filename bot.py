@@ -2,12 +2,15 @@
 """
 Apple Newsroom -> Telegram
 
-Controlla il feed ufficiale di Apple Newsroom ogni 30 secondi. Appena esce un
+Controlla il feed ufficiale di Apple Newsroom ogni 10 secondi. Appena esce un
 nuovo articolo ti manda su Telegram:
   1. subito: titolo + sommario + link
   2. un collage verticale 9:16 con le prime 3 foto orizzontali (serve Pillow)
   3. tutte le foto dell'articolo in alta qualità (come file, senza compressione)
-  4. i link per scaricare tutti i media (zip) e gli eventuali video
+  4. i video dell'articolo (H.264, sotto i 50 MB di Telegram; serve ffmpeg)
+  5. i link per scaricare tutti i media (zip)
+
+In chat: /config per scegliere il separatore del collage (nessuno, nero, hex).
 
 Solo Python 3 (già su macOS). Per il collage: pip3 install pillow (opzionale).
 
@@ -20,7 +23,10 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -51,12 +57,15 @@ load_env()
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-INTERVAL = float(os.environ.get("POLL_SECONDS", "30"))
+INTERVAL = float(os.environ.get("POLL_SECONDS", "10"))
 SEND_AS = os.environ.get("SEND_AS", "document").lower()  # document | photo
 API = os.environ.get("TELEGRAM_API", "https://api.telegram.org")
 FEED_URL = os.environ.get("FEED_URL", "https://www.apple.com/newsroom/rss-feed.rss")
 SITE = "https://www.apple.com"
 STATE_FILE = BASE / "seen.json"
+SETTINGS_FILE = BASE / "settings.json"
+FFMPEG = shutil.which("ffmpeg")
+FFPROBE = shutil.which("ffprobe")
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
       "(KHTML, like Gecko) Version/17.0 Safari/605.1.15")
 ATOM = "{http://www.w3.org/2005/Atom}"
@@ -124,6 +133,9 @@ IMG_RE = re.compile(
     r'(?:https?://www\.apple\.com)?'
     r'(/newsroom/images/\d{4}/\d{2}/[^"\'\s)<>,]+?\.(?:jpe?g|png|webp))'
     r'(?=["\'\s)<>,]|$)', re.I)
+VIDEO_RE = re.compile(
+    r'(?:https?://www\.apple\.com)?(/newsroom/videos/[^"\'\s)<>,&]+?\.(?:mp4|m3u8))'
+    r'(?=["\'\s)<>,&]|$)', re.I)
 ZIP_RE = re.compile(
     r'(?:https?://www\.apple\.com)?(/newsroom/[^"\'\s)<>,]+?\.zip)(?=["\'\s)<>,]|$)', re.I)
 
@@ -197,7 +209,12 @@ def extract_media(page_html, link):
             zips.append(u)
     all_media = next((z for z in zips if z.rsplit("/", 1)[-1].startswith("Media-of-")), None)
     videos = [z for z in zips if "/videos/" in z]
-    return {"images": images, "all_media": all_media, "videos": videos}
+    clips = []
+    for m in VIDEO_RE.finditer(page_html):
+        u = SITE + m.group(1)
+        if u not in clips:
+            clips.append(u)
+    return {"images": images, "all_media": all_media, "videos": videos, "clips": clips}
 
 
 # ----------------------------------------------------------------- telegram
@@ -228,7 +245,7 @@ def tg(method, fields=None, files=None, tries=5, need_chat=True):
             ctype = "application/x-www-form-urlencoded"
         req = urllib.request.Request(url, data=body, headers={"Content-Type": ctype})
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=300) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", "replace")
@@ -252,9 +269,9 @@ def esc(s):
     return html.escape(s or "", quote=False)
 
 
-def send_text(text):
+def send_text(text, **extra):
     tg("sendMessage", {"text": text, "parse_mode": "HTML",
-                       "disable_web_page_preview": "true"})
+                       "disable_web_page_preview": "true", **extra})
 
 
 def ctype_of(fn):
@@ -289,7 +306,7 @@ except ImportError:  # collage disattivato finché non installi Pillow
     Image = None
 
 COLLAGE_W = int(os.environ.get("COLLAGE_WIDTH", "1080"))       # altezza = W*16/9
-COLLAGE_GAP = int(os.environ.get("COLLAGE_GAP", "8"))          # px di bordo nero tra le foto
+COLLAGE_GAP = int(os.environ.get("COLLAGE_GAP", "8"))          # px del separatore, se attivo (/config)
 COLLAGE_ON = os.environ.get("COLLAGE", "1") not in ("0", "false", "no")
 
 
@@ -321,14 +338,16 @@ def make_collage(datas):
         return None
     n = len(chosen)
     W, H = COLLAGE_W, COLLAGE_W * 16 // 9
-    usable = H - COLLAGE_GAP * (n - 1)
+    sep = SETTINGS.get("sep")  # None = foto attaccate, altrimenti "#RRGGBB"
+    gap = COLLAGE_GAP if sep else 0
+    usable = H - gap * (n - 1)
     heights = [usable // n + (1 if i < usable % n else 0) for i in range(n)]
-    canvas = Image.new("RGB", (W, H), (0, 0, 0))
+    canvas = Image.new("RGB", (W, H), sep or "#000000")
     y = 0
     for im, h in zip(chosen, heights):
         cell = ImageOps.fit(im, (W, h), method=Image.LANCZOS, centering=(0.5, 0.5))
         canvas.paste(cell, (0, y))
-        y += h + COLLAGE_GAP
+        y += h + gap
     out = io.BytesIO()
     canvas.save(out, "JPEG", quality=95, subsampling=0)
     return out.getvalue()
@@ -395,7 +414,7 @@ def send_media(entry):
         try:  # collage 9:16 per i social: va per primo, è la cosa pronta da postare
             col = make_collage([d for _, d in results if d is not None])
             if col:
-                tg("sendDocument", {"caption": "🧩 Collage 9:16 (prime foto orizzontali)"},
+                tg("sendDocument", {"caption": "🧩 Collage 9:16"},
                    [("document", "collage_9x16.jpg", col, "image/jpeg")])
             elif Image is None and COLLAGE_ON:
                 log("Pillow non installato: collage saltato (pip3 install pillow)")
@@ -405,6 +424,8 @@ def send_media(entry):
     if failed:
         send_text(f"⚠️ {failed} foto non scaricate: apri il link dell'articolo.")
 
+    send_videos(media["clips"])
+
     extra = []
     if media["all_media"]:
         extra.append(f"📦 Tutti i media (zip): {esc(media['all_media'])}")
@@ -412,6 +433,101 @@ def send_media(entry):
         extra.append(f"🎬 Video (zip): {esc(v)}")
     if extra:
         send_text("\n".join(extra))
+
+
+# -------------------------------------------------------------------- video
+TG_MAX = 49 * 1024 * 1024  # limite upload della Bot API: 50 MB
+
+
+def m3u8_attrs(line):
+    return {k: v.strip('"') for k, v in re.findall(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)', line)}
+
+
+def hls_to_mp4(url):
+    """Variante H.264 più alta che sta sotto i 50 MB, rimuxata in mp4 (niente ricodifica)."""
+    master = http_get(url).decode("utf-8", "replace")
+    lines = master.splitlines()
+    audio, variants = {}, []
+    for i, line in enumerate(lines):
+        if line.startswith("#EXT-X-MEDIA:TYPE=AUDIO") and "DEFAULT=YES" in line:
+            a = m3u8_attrs(line)
+            audio.setdefault(a.get("GROUP-ID"), urllib.parse.urljoin(url, a["URI"]))
+        elif line.startswith("#EXT-X-STREAM-INF:") and i + 1 < len(lines):
+            a = m3u8_attrs(line)
+            bw = int(a.get("AVERAGE-BANDWIDTH") or a.get("BANDWIDTH") or 0)
+            variants.append((bw, a, urllib.parse.urljoin(url, lines[i + 1].strip())))
+    # H.264 si vede inline ovunque; HEVC solo se non c'è altro
+    variants = [v for v in variants if v[1].get("CODECS", "").startswith("avc1")] or variants
+    variants.sort(key=lambda v: v[0], reverse=True)
+    if not variants:
+        return None
+    pl = http_get(variants[-1][2]).decode("utf-8", "replace")
+    dur = sum(float(x) for x in re.findall(r"#EXTINF:([\d.]+)", pl))
+    for bw, a, vurl in variants:
+        if bw * dur / 8 > TG_MAX * 0.95:
+            continue
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "v.mp4")
+            cmd = [FFMPEG, "-v", "error", "-y", "-user_agent", UA, "-i", vurl]
+            aurl = audio.get(a.get("AUDIO"))
+            if aurl:
+                cmd += ["-user_agent", UA, "-i", aurl, "-map", "0:v:0", "-map", "1:a:0"]
+            cmd += ["-c", "copy", "-movflags", "+faststart", out]
+            subprocess.run(cmd, check=True, timeout=900)
+            data = Path(out).read_bytes()
+        if len(data) <= TG_MAX:
+            return data
+    return None
+
+
+def video_meta(data):
+    """width/height/duration per sendVideo: senza, Telegram mostra il video quadrato."""
+    if not FFPROBE:
+        return {}
+    with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
+        f.write(data)
+        f.flush()
+        out = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0",
+                              "-show_entries", "stream=width,height:format=duration",
+                              "-of", "json", f.name],
+                             capture_output=True, text=True, timeout=60).stdout
+    j = json.loads(out)
+    st = j["streams"][0]
+    return {"width": st["width"], "height": st["height"],
+            "duration": int(float(j["format"].get("duration", 0)))}
+
+
+def send_videos(urls):
+    failed = 0
+    for u in urls:
+        name = u.rsplit("/", 1)[-1]
+        if name.endswith(".m3u8"):
+            name = re.sub(r"_\d+x\d+$", "", name[:-5])
+        else:  # autoplay: .../<nome-video>/large_2x.mp4
+            name = u.rsplit("/", 2)[-2]
+        try:
+            if u.endswith(".m3u8"):
+                if not FFMPEG:
+                    log("ffmpeg non installato: video HLS saltato", u)
+                    failed += 1
+                    continue
+                data = hls_to_mp4(u)
+            else:
+                data = download(u)
+                data = data if len(data) <= TG_MAX else None
+            if not data:
+                log("video oltre i 50 MB di Telegram:", u)
+                failed += 1
+                continue
+            tg("sendVideo", {"caption": f"🎬 {esc(name)}", "parse_mode": "HTML",
+                             "supports_streaming": "true", **video_meta(data)},
+               [("video", name + ".mp4", data, "video/mp4")])
+        except Exception as e:  # noqa: BLE001
+            log("video fallito:", u, e)
+            failed += 1
+    if failed:
+        send_text(f"⚠️ {failed} video non inviati (troppo grandi o non scaricabili): "
+                  "li trovi nell'articolo.")
 
 
 # -------------------------------------------------------------------- state
@@ -426,6 +542,108 @@ def load_seen():
 
 def save_seen(seen):
     STATE_FILE.write_text(json.dumps(seen[-500:]), encoding="utf-8")
+
+
+try:
+    SETTINGS = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+except Exception:  # noqa: BLE001
+    SETTINGS = {"sep": None}
+
+
+# ------------------------------------------------------------------ /config
+HEX_RE = re.compile(r"^#?([0-9a-f]{6})$", re.I)
+UPD = {"offset": 0, "await_hex": False}
+
+
+def sep_label():
+    sep = SETTINGS.get("sep")
+    return "nessuno" if not sep else ("nero" if sep == "#000000" else sep)
+
+
+def parse_sep(s):
+    s = s.strip().lower()
+    if s in ("nessuno", "no", "none", "off"):
+        return None
+    if s in ("nero", "black"):
+        return "#000000"
+    m = HEX_RE.match(s)
+    if m:
+        return "#" + m.group(1).upper()
+    raise ValueError(s)
+
+
+def set_sep(v):
+    SETTINGS["sep"] = v
+    SETTINGS_FILE.write_text(json.dumps(SETTINGS), encoding="utf-8")
+    send_text(f"✅ Separatore del collage: <b>{esc(sep_label())}</b>")
+
+
+def config_menu():
+    kb = {"inline_keyboard": [[
+        {"text": "🚫 Nessuno", "callback_data": "sep:none"},
+        {"text": "⬛ Nero", "callback_data": "sep:#000000"},
+        {"text": "🎨 Colore…", "callback_data": "sep:custom"},
+    ]]}
+    send_text(f"⚙️ <b>Collage</b>\nSeparatore tra le foto: <b>{esc(sep_label())}</b>\n\n"
+              "Scegli qui sotto, oppure scrivi <code>/config #FF3B30</code>.",
+              reply_markup=json.dumps(kb))
+
+
+def handle_update(u):
+    q = u.get("callback_query")
+    if q:
+        tg("answerCallbackQuery", {"callback_query_id": q["id"]}, need_chat=False)
+        if str(q.get("message", {}).get("chat", {}).get("id")) != CHAT_ID:
+            return
+        data = q.get("data", "")
+        if data == "sep:custom":
+            UPD["await_hex"] = True
+            send_text("Mandami il colore in hex, es. <code>#FF3B30</code>")
+        elif data.startswith("sep:"):
+            UPD["await_hex"] = False
+            set_sep(None if data == "sep:none" else data[4:])
+        return
+    m = u.get("message") or {}
+    if str(m.get("chat", {}).get("id")) != CHAT_ID:  # risponde solo a te
+        return
+    words = (m.get("text") or "").split()
+    if words and words[0].split("@")[0] == "/config":
+        UPD["await_hex"] = False
+        if len(words) == 1:
+            config_menu()
+            return
+        arg = words[-1]  # "/config nero", "/config separatore #FF3B30", ...
+    elif UPD["await_hex"] and words:
+        arg = words[0]
+    else:
+        return
+    try:
+        v = parse_sep(arg)
+    except ValueError:
+        send_text("Non ho capito. Scrivi <code>nero</code>, <code>nessuno</code> "
+                  "oppure un hex come <code>#FF3B30</code>.")
+        return
+    UPD["await_hex"] = False
+    set_sep(v)
+
+
+def wait_updates(until):
+    """Al posto della sleep: long polling dei comandi fino a `until`."""
+    while (left := until - time.time()) > 0:
+        try:
+            res = tg("getUpdates", {"offset": UPD["offset"], "timeout": max(1, int(left)),
+                                    "allowed_updates": '["message","callback_query"]'},
+                     tries=1, need_chat=False)
+        except Exception as e:  # noqa: BLE001
+            log("getUpdates:", e)
+            time.sleep(min(left, 5))
+            continue
+        for u in res.get("result", []):
+            UPD["offset"] = u["update_id"] + 1
+            try:
+                handle_update(u)
+            except Exception as e:  # noqa: BLE001
+                log("comando fallito:", e)
 
 
 # --------------------------------------------------------------------- main
@@ -465,6 +683,11 @@ def cmd_test():
 
 def run():
     need_config()
+    try:
+        tg("setMyCommands", {"commands": json.dumps(
+            [{"command": "config", "description": "Personalizza il collage"}])}, need_chat=False)
+    except Exception as e:  # noqa: BLE001
+        log("setMyCommands:", e)
     seen = load_seen()
     entries = None
     while entries is None:
@@ -521,7 +744,7 @@ def run():
                     alerted = True
                 except Exception:  # noqa: BLE001
                     pass
-        time.sleep(max(1.0, INTERVAL - (time.time() - t0)))
+        wait_updates(t0 + INTERVAL)
 
 
 if __name__ == "__main__":
