@@ -10,7 +10,7 @@ nuovo articolo ti manda su Telegram:
   4. i video dell'articolo (H.264, sotto i 50 MB di Telegram; serve ffmpeg)
   5. i link per scaricare tutti i media (zip)
 
-In chat: /config per scegliere il separatore del collage (nessuno, nero, hex).
+In chat: /last manda l'ultimo articolo; /config sceglie il separatore del collage.
 
 Solo Python 3 (già su macOS). Per il collage: pip3 install pillow (opzionale).
 
@@ -607,7 +607,13 @@ def handle_update(u):
     if str(m.get("chat", {}).get("id")) != CHAT_ID:  # risponde solo a te
         return
     words = (m.get("text") or "").split()
-    if words and words[0].split("@")[0] == "/config":
+    cmd = words[0].split("@")[0] if words else ""
+    if cmd == "/last":
+        e = fetch_feed()[0]
+        announce(e)
+        send_media(e)
+        return
+    if cmd == "/config":
         UPD["await_hex"] = False
         if len(words) == 1:
             config_menu()
@@ -685,7 +691,8 @@ def run():
     need_config()
     try:
         tg("setMyCommands", {"commands": json.dumps(
-            [{"command": "config", "description": "Personalizza il collage"}])}, need_chat=False)
+            [{"command": "last", "description": "Mandami l'ultimo articolo"},
+             {"command": "config", "description": "Personalizza il collage"}])}, need_chat=False)
     except Exception as e:  # noqa: BLE001
         log("setMyCommands:", e)
     seen = load_seen()
