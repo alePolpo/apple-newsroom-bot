@@ -8,7 +8,7 @@ Controlla il feed ufficiale di Apple Newsroom ogni 10 secondi. Per ogni nuovo ar
 4. **i video** dell'articolo (H.264 sotto i 50 MB di Telegram; serve `ffmpeg`)
 5. link allo zip con tutti i media
 
-In chat, `/config` sceglie il separatore del collage: nessuno (default), nero o un colore hex (`/config #FF3B30`). Risponde solo al `TELEGRAM_CHAT_ID`; la scelta sta in `settings.json`.
+In chat, `/last` manda l'ultimo articolo uscito. `/config` sceglie il separatore del collage: nessuno (default), nero o un colore hex (`/config #FF3B30`). Risponde solo al `TELEGRAM_CHAT_ID`; la scelta sta in `settings.json`.
 
 Online gira su GitHub Actions (`.github/workflows/bot.yml`, secret `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`): ogni run dura circa 5h40m, poi salva lo stato nel repo e parte il successivo.
 
