@@ -1,11 +1,16 @@
 # Apple Newsroom → Telegram
 
-Controlla il feed ufficiale di Apple Newsroom ogni 30 secondi. Per ogni nuovo articolo ti manda su Telegram:
+Controlla il feed ufficiale di Apple Newsroom ogni 10 secondi. Per ogni nuovo articolo ti manda su Telegram:
 
 1. **subito** titolo, categoria, sommario e link
 2. **collage 9:16** (1080×1920) con le prime 3 foto orizzontali dell'articolo
 3. **tutte le foto** dell'articolo in alta qualità (come file, senza compressione di Telegram)
-4. link allo zip con tutti i media e ai video scaricabili
+4. **i video** dell'articolo (H.264 sotto i 50 MB di Telegram; serve `ffmpeg`)
+5. link allo zip con tutti i media
+
+In chat, `/config` sceglie il separatore del collage: nessuno (default), nero o un colore hex (`/config #FF3B30`). Risponde solo al `TELEGRAM_CHAT_ID`; la scelta sta in `settings.json`.
+
+Online gira su GitHub Actions (`.github/workflows/bot.yml`, secret `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`): ogni run dura circa 5h40m, poi salva lo stato nel repo e parte il successivo.
 
 ## Setup (5 minuti, una volta sola)
 
@@ -29,10 +34,10 @@ Al primo avvio gli articoli già usciti vengono ignorati; ti arriva solo un mess
 
 | Variabile | Default | Cosa fa |
 |---|---|---|
-| `POLL_SECONDS` | 30 | ogni quanto controlla |
+| `POLL_SECONDS` | 10 | ogni quanto controlla |
 | `SEND_AS` | document | `document` = foto originali; `photo` = anteprime Telegram |
 | `COLLAGE` | 1 | `0` per disattivarlo |
-| `COLLAGE_GAP` | 8 | px di bordo nero tra le tre foto (`0` = nessuno) |
+| `COLLAGE_GAP` | 8 | px del separatore quando è attivo (colore da `/config`) |
 | `COLLAGE_WIDTH` | 1080 | larghezza del collage (altezza = ×16/9) |
 
 ## Note
